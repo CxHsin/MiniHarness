@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(curl -s \"https://api.github.com/repos/HKUDS/OpenHarness/contents/src/openharness\")",
+      "Bash(python3 -c ' *)"
+    ]
+  }
+}

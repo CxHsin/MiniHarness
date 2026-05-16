@@ -1,0 +1,176 @@
+import pytest
+
+import miniharness.cli as cli
+from miniharness.cli import build_parser
+
+
+def test_parser_accepts_one_shot_task():
+    parser = build_parser()
+
+    args = parser.parse_args(["summarize this project"])
+
+    assert args.task == "summarize this project"
+    assert args.max_steps == 8
+    assert args.history_budget_chars == 120000
+    assert args.log_level == "WARNING"
+    assert args.base_url is None
+
+
+def test_parser_verbose_sets_log_level_info():
+    parser = build_parser()
+
+    args = parser.parse_args(["--verbose", "summarize"])
+
+    assert args.verbose is True
+
+
+def test_parser_rejects_negative_max_steps():
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["--max-steps", "-1", "summarize"])
+
+    assert exc.value.code == 2
+
+
+def test_parser_rejects_invalid_log_level():
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["--log-level", "TRACE", "summarize"])
+
+    assert exc.value.code == 2
+
+
+def test_main_prints_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+
+    assert exc.value.code == 0
+    assert "mh 0.1.0" in capsys.readouterr().out
+
+
+def test_main_requires_api_key_for_task(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    code = cli.main(["--cwd", str(tmp_path), "summarize"])
+
+    assert code == 2
+    assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
+def test_main_prints_final_answer_to_stdout(monkeypatch, tmp_path, capsys):
+    captured_client_args = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, task):
+            return cli.AgentOutcome(output="final answer", error=None, exit_code=0)
+
+    def fake_model_client(api_key, model, base_url=None):
+        captured_client_args.update(
+            {"api_key": api_key, "model": model, "base_url": base_url}
+        )
+        return object()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(cli, "OpenAIModelClient", fake_model_client)
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+
+    code = cli.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--model",
+            "qwen",
+            "--base-url",
+            "http://localhost:11434/v1",
+            "summarize",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert captured.out == "final answer\n"
+    assert captured_client_args == {
+        "api_key": "key",
+        "model": "qwen",
+        "base_url": "http://localhost:11434/v1",
+    }
+
+
+def test_main_without_task_enters_repl(monkeypatch, tmp_path, capsys):
+    tasks = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, task):
+            tasks.append(task)
+            return cli.AgentOutcome(output=f"answer: {task}", error=None, exit_code=0)
+
+        def reset(self):
+            tasks.append("<reset>")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+    inputs = iter(["first task", "", "/reset", "second task", "/exit"])
+
+    code = cli.main(["--cwd", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert tasks == ["first task", "<reset>", "second task"]
+    assert "answer: first task" in captured.out
+    assert "answer: second task" in captured.out
+    assert "Session reset" in captured.err
+
+
+def test_main_handles_keyboard_interrupt(monkeypatch, tmp_path, capsys):
+    class InterruptingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, task):
+            raise KeyboardInterrupt
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", InterruptingAgent)
+
+    code = cli.main(["--cwd", str(tmp_path), "summarize"])
+
+    assert code == 1
+    assert "Interrupted" in capsys.readouterr().err
+
+
+def test_main_reports_model_runtime_errors_without_traceback(monkeypatch, tmp_path, capsys):
+    class FailingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, task):
+            raise RuntimeError("provider returned 404 not found")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FailingAgent)
+
+    code = cli.main(["--cwd", str(tmp_path), "summarize"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "provider returned 404 not found" in captured.err
+    assert "Traceback" not in captured.err
