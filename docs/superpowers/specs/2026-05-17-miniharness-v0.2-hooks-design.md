@@ -105,7 +105,7 @@ This is enough for useful trace output while keeping the event vocabulary small.
 `run.started`
 
 - Emitted once at the beginning of `Agent.run()`
-- Payload includes the user task and configured step limit
+- Payload includes the user task, configured step limit, and active model name
 
 `step.started`
 
@@ -117,12 +117,15 @@ This is enough for useful trace output while keeping the event vocabulary small.
 - Emitted after one model response is received
 - Payload includes `finish_reason`, whether tool calls were present, and tool call count
 - Continuation responses triggered by `finish_reason="length"` also emit `model.completed`
+- This event represents one consumed `model_client.complete()` result after any internal client retries, not one raw HTTP attempt
+- v0.2 intentionally omits `model.started`, so long model waits may appear silent between `step.started` and `model.completed`
 
 `tool.started`
 
 - Emitted before a single tool call executes
 - Payload includes tool name, tool call id, and arguments summary
 - This event fires even when argument parsing later fails, so every tool attempt is bracketed by `tool.started` and `tool.completed`
+- The arguments summary should be `json.dumps(arguments, ensure_ascii=False)` truncated to 200 characters so hooks and tests have a stable representation
 
 `tool.completed`
 
@@ -139,6 +142,7 @@ This is enough for useful trace output while keeping the event vocabulary small.
 
 - Emitted once when the agent exits with an error outcome
 - Payload includes total steps used and the final error message
+- This includes no-progress termination, maximum-step termination, and continuation failures after a truncated final answer
 
 ### Deliberate Omissions
 
@@ -170,6 +174,7 @@ Important integration rules:
 - Output truncation should be observable through `tool.completed` payload metadata rather than by introducing a separate truncation event.
 - `reset()` does not need hook events in v0.2 because hooks are scoped to a run, not general agent state mutation.
 - The continuation path in `_continue_truncated_final_answer()` should emit a second `model.completed` event and never emit `tool.started` or `tool.completed`, because that request uses `tool_choice="none"`.
+- Every `model_client.complete()` invocation should emit exactly one `model.completed`, including the continuation call after a truncated answer.
 
 ## CLI Integration
 
@@ -187,7 +192,12 @@ Behavior by mode:
 
 `--trace` should be independent from `--verbose`. Users may want a clean execution trace without full logger noise.
 
-`--trace` is a CLI concern first. `load_config()` should surface a boolean trace flag, and `_build_agent()` should wire a `ConsoleHook` into the agent when that flag is set.
+`--trace` is a CLI concern first. The plumbing should be explicit:
+
+- `build_parser()` adds `--trace`
+- `Config` adds `trace: bool = False`
+- `load_config()` copies `args.trace` into `Config.trace`
+- `_build_agent()` constructs a `ConsoleHook` when `config.trace` is true and passes it into `Agent`
 
 ### ConsoleHook
 
@@ -201,6 +211,7 @@ It should produce compact lines such as:
 [step 1] tool read_file started
 [step 1] tool read_file completed ok
 [run] completed in 2 steps
+[run] failed: maximum agent steps reached
 ```
 
 Design constraints:
@@ -209,6 +220,10 @@ Design constraints:
 - Lines should stay concise and avoid dumping full JSON arguments.
 - Final assistant content must still go only to stdout.
 - The trace should help a human follow execution, not mirror the full message history.
+- Trace lines and ordinary CLI error lines may both appear on stderr. This mixing is acceptable in v0.2 as long as stdout remains reserved for the final answer.
+- User-facing step numbers in trace output should be 1-based even though the internal loop counter is 0-based.
+- The continuation `model.completed` event should render with the triggering step number so it does not appear orphaned in trace output, for example `[step 3] model completed (continuation)`.
+- `run.completed` and `run.failed` should render differently so success and failure are visually distinguishable at a glance.
 
 The CLI remains the owner of presentation. The agent only emits structured events.
 
@@ -224,6 +239,8 @@ This increment should be backward-compatible by default:
 Hooks are additive. When no hooks are attached, the runtime behavior should be functionally identical to v0.1.2.
 
 The `step` field uses the current loop iteration number for normal events. For the continuation call after a truncated final answer, the emitted `model.completed` event should reuse the same step number as the truncated response it continues, so the two responses stay grouped in trace output.
+
+In REPL mode, hooks are attached when the `Agent` is constructed for the session and reused across turns. Each `agent.run()` invocation emits its own fresh event stream with a new `run_id`.
 
 ## Testing Strategy
 
