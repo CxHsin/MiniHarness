@@ -67,13 +67,36 @@ def test_agent_reset_clears_previous_conversation(tmp_path):
     assert messages[-1]["content"] == "fresh"
 
 
-def test_agent_length_finish_reason_exits_non_zero(tmp_path):
-    model = FakeModelClient([ModelResponse(content="partial", finish_reason="length")])
+def test_agent_continues_once_when_final_answer_is_truncated(tmp_path):
+    model = FakeModelClient(
+        [
+            ModelResponse(content="partial ", finish_reason="length"),
+            ModelResponse(content="answer", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path)
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    assert outcome.output == "partial answer"
+    assert model.calls[1]["messages"][-1]["role"] == "user"
+    assert "Continue the previous answer" in model.calls[1]["messages"][-1]["content"]
+
+
+def test_agent_reports_error_when_continuation_is_still_truncated(tmp_path):
+    model = FakeModelClient(
+        [
+            ModelResponse(content="partial ", finish_reason="length"),
+            ModelResponse(content="answer", finish_reason="length"),
+        ]
+    )
     agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path)
 
     outcome = agent.run("hello")
 
     assert outcome.exit_code == 1
+    assert outcome.output == "partial answer"
     assert "truncated" in outcome.error
 
 

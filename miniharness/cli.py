@@ -91,7 +91,7 @@ def _build_agent(config) -> Agent:
 
 
 def _run_repl(agent: Agent) -> int:
-    print("MiniHarness REPL. Type /exit to quit, /reset to clear context.", file=sys.stderr)
+    print("MiniHarness REPL. Type /help for commands.", file=sys.stderr)
     while True:
         try:
             task = input("mh> ").strip()
@@ -102,6 +102,9 @@ def _run_repl(agent: Agent) -> int:
             continue
         if task in {"/exit", "/quit"}:
             return 0
+        if task == "/help":
+            _print_repl_help()
+            continue
         if task == "/reset":
             agent.reset()
             print("Session reset", file=sys.stderr)
@@ -114,8 +117,22 @@ def _run_repl(agent: Agent) -> int:
             continue
         outcome = agent.run(task)
         _print_outcome(outcome)
-        if outcome.exit_code != 0:
-            return outcome.exit_code
+
+
+def _print_repl_help() -> None:
+    print(
+        "\n".join(
+            [
+                "Commands:",
+                "  /help   Show this help",
+                "  /cwd    Show current working directory",
+                "  /reset  Clear the current session",
+                "  /exit   Exit the REPL",
+                "  /quit   Exit the REPL",
+            ]
+        ),
+        file=sys.stderr,
+    )
 
 
 def _print_outcome(outcome: AgentOutcome) -> None:

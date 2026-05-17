@@ -58,11 +58,7 @@ class Agent:
                 tool_choice="auto",
             )
             if response.finish_reason == "length":
-                return AgentOutcome(
-                    output=response.content or "",
-                    error="model response was truncated",
-                    exit_code=1,
-                )
+                return self._continue_truncated_final_answer(response.content or "")
             if not response.tool_calls:
                 return AgentOutcome(response.content or "", None, 0)
 
@@ -90,6 +86,31 @@ class Agent:
             if no_progress_rounds >= self.max_no_progress_steps:
                 return AgentOutcome("", "no progress after repeated tool failures", 1)
         return AgentOutcome("", "maximum agent steps reached", 1)
+
+    def _continue_truncated_final_answer(self, partial: str) -> AgentOutcome:
+        self.session.add_turn(
+            [
+                {"role": "assistant", "content": partial},
+                {
+                    "role": "user",
+                    "content": (
+                        "Continue the previous answer from exactly where it stopped. "
+                        "Do not repeat text that was already written."
+                    ),
+                },
+            ]
+        )
+        response = self.model_client.complete(
+            self.session.get_messages(),
+            [tool.to_openai_tool() for tool in self.tools.values()],
+            tool_choice="none",
+        )
+        output = partial + (response.content or "")
+        if response.finish_reason == "length":
+            return AgentOutcome(output, "model response was truncated after continuation", 1)
+        if response.tool_calls:
+            return AgentOutcome(output, "model requested tools during continuation", 1)
+        return AgentOutcome(output, None, 0)
 
     def reset(self) -> None:
         self.session = Session(

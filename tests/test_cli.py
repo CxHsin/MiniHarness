@@ -47,7 +47,7 @@ def test_main_prints_version(capsys):
         cli.main(["--version"])
 
     assert exc.value.code == 0
-    assert "mh 0.1.0" in capsys.readouterr().out
+    assert "mh 0.1.1" in capsys.readouterr().out
 
 
 def test_main_requires_api_key_for_task(monkeypatch, tmp_path, capsys):
@@ -132,6 +132,71 @@ def test_main_without_task_enters_repl(monkeypatch, tmp_path, capsys):
     assert "answer: first task" in captured.out
     assert "answer: second task" in captured.out
     assert "Session reset" in captured.err
+
+
+def test_repl_help_prints_commands_and_continues(monkeypatch, tmp_path, capsys):
+    tasks = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, task):
+            tasks.append(task)
+            return cli.AgentOutcome(output=f"answer: {task}", error=None, exit_code=0)
+
+        def reset(self):
+            raise AssertionError("reset should not be called")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+    inputs = iter(["/help", "next task", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    code = cli.main(["--cwd", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert tasks == ["next task"]
+    assert "/reset" in captured.err
+    assert "/cwd" in captured.err
+    assert "answer: next task" in captured.out
+
+
+def test_repl_keeps_running_after_agent_error(monkeypatch, tmp_path, capsys):
+    tasks = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, task):
+            tasks.append(task)
+            if task == "bad task":
+                return cli.AgentOutcome(output="", error="failed once", exit_code=1)
+            return cli.AgentOutcome(output="recovered", error=None, exit_code=0)
+
+        def reset(self):
+            pass
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+    inputs = iter(["bad task", "good task", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+
+    code = cli.main(["--cwd", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert tasks == ["bad task", "good task"]
+    assert "failed once" in captured.err
+    assert "recovered" in captured.out
 
 
 def test_main_handles_keyboard_interrupt(monkeypatch, tmp_path, capsys):

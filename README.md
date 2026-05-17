@@ -6,7 +6,7 @@ MiniHarness 是一个小型、本地运行的 CLI Agent。它使用 OpenAI-compa
 
 ## 最新状态
 
-- 当前版本：`0.1.0`
+- 当前版本：`0.1.1`
 - 当前入口：`mh`
 - 当前运行模式：一次性任务模式和交互 REPL
 - 当前模型接口：OpenAI-compatible Chat Completions API
@@ -117,7 +117,7 @@ mh "阅读 README 并总结项目目标"
 
 ```text
 mh
-MiniHarness REPL. Type /exit to quit, /reset to clear context.
+MiniHarness REPL. Type /help for commands.
 mh> 总结这个项目
 ...
 mh> /reset
@@ -129,12 +129,13 @@ REPL 命令：
 
 | 命令 | 说明 |
 | --- | --- |
+| `/help` | 查看 REPL 命令 |
 | `/exit` | 退出 REPL |
 | `/quit` | 退出 REPL |
 | `/reset` | 清空当前 session 的消息历史 |
 | `/cwd` | 打印当前工作目录 |
 
-REPL 会在同一个进程中复用 session，因此你可以追问“继续”“基于上一步修改”等上下文相关任务。使用 `/reset` 可以让下一轮从干净上下文开始。
+REPL 会在同一个进程中复用 session，因此你可以追问“继续”“基于上一步修改”等上下文相关任务。使用 `/reset` 可以让下一轮从干净上下文开始。单轮任务失败时，REPL 会打印错误并继续等待下一条输入。
 
 ## Provider 兼容性概览
 
@@ -162,7 +163,7 @@ MiniHarness 的 agent loop 会：
 - 解析模型返回的 tool calls。
 - 顺序执行工具，并把工具结果以 JSON tool message 返回给模型。
 - 当模型不再返回 tool calls 时，将该回复视为最终答案。
-- 当 `finish_reason="length"` 时返回错误，避免把截断回答当作完成结果。
+- 当最终文本回答因 `finish_reason="length"` 截断时，自动续写一次；如果仍然截断，则返回错误，避免把半截回答当作完成结果。
 - 使用 no-progress 计数器避免连续失败工具调用无限消耗步骤数。
 
 默认上限：
