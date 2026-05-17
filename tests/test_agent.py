@@ -4,8 +4,11 @@ import pytest
 from tests.conftest import FakeModelClient
 
 from miniharness.agent import Agent
+from miniharness.capabilities import AgentCapabilities
 from miniharness.hooks import HookEvent
 from miniharness.model_client import ModelResponse, ToolCall
+from miniharness.policy import RuntimePolicy
+from miniharness.runtime import AgentRuntime
 from miniharness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
 
@@ -37,6 +40,45 @@ def test_agent_returns_final_answer_without_tool_calls(tmp_path):
 
     assert outcome.exit_code == 0
     assert outcome.output == "done"
+
+
+def test_agent_builds_default_runtime_when_not_provided(tmp_path):
+    model = FakeModelClient([ModelResponse(content="done", finish_reason="stop")])
+    agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path)
+
+    assert agent.runtime.cwd == tmp_path.resolve()
+    assert agent.runtime.policy == RuntimePolicy()
+    assert agent.runtime.capabilities == AgentCapabilities()
+    assert agent.runtime.session.cwd == tmp_path.resolve()
+    assert agent.runtime.tool_context.cwd == tmp_path.resolve()
+
+
+def test_agent_uses_provided_runtime_and_reset_rebuilds_session_only(tmp_path):
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(shell_timeout=77, allow_outside_cwd=True),
+        capabilities=AgentCapabilities(),
+        history_budget_chars=456,
+    )
+    original_tool_context = runtime.tool_context
+    original_policy = runtime.policy
+    original_capabilities = runtime.capabilities
+    original_session = runtime.session
+
+    model = FakeModelClient([ModelResponse(content="done", finish_reason="stop")])
+    agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path, runtime=runtime)
+
+    assert agent.runtime is runtime
+    assert agent.session is original_session
+
+    agent.reset()
+
+    assert agent.runtime.session is not original_session
+    assert agent.runtime.session.cwd == tmp_path.resolve()
+    assert agent.runtime.session.history_budget_chars == 456
+    assert agent.runtime.tool_context is original_tool_context
+    assert agent.runtime.policy is original_policy
+    assert agent.runtime.capabilities is original_capabilities
 
 
 def test_agent_reuses_session_across_runs_without_duplicate_system_prompt(tmp_path):

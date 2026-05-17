@@ -5,9 +5,12 @@ from collections.abc import Sequence
 
 from . import __version__
 from .agent import Agent, AgentOutcome
+from .capabilities import AgentCapabilities
 from .config import load_config
 from .hooks import ConsoleHook, HookEvent
 from .model_client import OpenAIModelClient
+from .policy import RuntimePolicy
+from .runtime import AgentRuntime
 from .tools import TOOL_REGISTRY
 
 
@@ -83,18 +86,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _build_agent(config) -> Agent:
     model_client = OpenAIModelClient(config.api_key, config.model, config.base_url)
-    hooks = [ConsoleHook()] if config.trace else None
+    hooks = [ConsoleHook()] if config.trace else []
+    runtime = AgentRuntime.create(
+        cwd=config.cwd,
+        policy=RuntimePolicy(
+            allow_outside_cwd=config.allow_outside_cwd,
+            shell_timeout=config.shell_timeout,
+        ),
+        capabilities=AgentCapabilities(),
+        history_budget_chars=config.history_budget_chars,
+        hooks=hooks,
+    )
     return Agent(
         model_client=model_client,
         tools=TOOL_REGISTRY,
         cwd=config.cwd,
         max_steps=config.max_steps,
         max_tool_output_chars=config.max_tool_output_chars,
-        history_budget_chars=config.history_budget_chars,
         max_no_progress_steps=config.max_no_progress_steps,
-        shell_timeout=config.shell_timeout,
-        allow_outside_cwd=config.allow_outside_cwd,
-        hooks=hooks,
+        runtime=runtime,
     )
 
 

@@ -10,5 +10,5 @@ should summarize changes, verification, and remaining limitations.
 """
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(runtime=None) -> str:
     return SYSTEM_PROMPT

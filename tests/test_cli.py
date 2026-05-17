@@ -55,7 +55,7 @@ def test_main_prints_version(capsys):
         cli.main(["--version"])
 
     assert exc.value.code == 0
-    assert "mh 0.1.2" in capsys.readouterr().out
+    assert "mh 0.2.1" in capsys.readouterr().out
 
 
 def test_main_requires_api_key_for_task(monkeypatch, tmp_path, capsys):
@@ -109,13 +109,14 @@ def test_main_prints_final_answer_to_stdout(monkeypatch, tmp_path, capsys):
         "model": "qwen",
         "base_url": "http://localhost:11434/v1",
     }
-    assert captured_agent_kwargs["hooks"] is None
+    assert "hooks" not in captured_agent_kwargs
+    assert captured_agent_kwargs["runtime"].hooks == []
 
 
 def test_main_trace_wires_console_hook_and_keeps_stdout_clean(monkeypatch, tmp_path, capsys):
     class FakeAgent:
         def __init__(self, **kwargs):
-            self._hook = kwargs["hooks"][0]
+            self._hook = kwargs["runtime"].hooks[0]
 
         def run(self, task):
             self._hook.handle(
@@ -149,6 +150,80 @@ def test_main_trace_wires_console_hook_and_keeps_stdout_clean(monkeypatch, tmp_p
     assert captured.out == "final answer\n"
     assert "[run] started" in captured.err
     assert "[run] run.completed" not in captured.err
+
+
+def test_main_builds_runtime_and_passes_it_to_agent(monkeypatch, tmp_path, capsys):
+    captured_agent_kwargs = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured_agent_kwargs.update(kwargs)
+
+        def run(self, task):
+            return cli.AgentOutcome(output="final answer", error=None, exit_code=0)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+
+    code = cli.main(["--trace", "--cwd", str(tmp_path), "summarize"])
+
+    assert code == 0
+    runtime = captured_agent_kwargs["runtime"]
+    assert runtime.cwd == tmp_path.resolve()
+    assert runtime.policy.shell_timeout == 30
+    assert runtime.policy.allow_outside_cwd is False
+    assert runtime.session.history_budget_chars == 120000
+    assert len(runtime.hooks) == 1
+    assert "hooks" not in captured_agent_kwargs
+
+
+def test_runtime_mapping_keeps_policy_session_and_loop_fields_separate(
+    monkeypatch, tmp_path
+):
+    captured_agent_kwargs = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured_agent_kwargs.update(kwargs)
+
+        def run(self, task):
+            return cli.AgentOutcome(output="done", error=None, exit_code=0)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+
+    cli.main(
+        [
+            "--cwd",
+            str(tmp_path),
+            "--shell-timeout",
+            "41",
+            "--history-budget-chars",
+            "765",
+            "--max-steps",
+            "9",
+            "--max-tool-output-chars",
+            "4321",
+            "--max-no-progress-steps",
+            "4",
+            "--allow-outside-cwd",
+            "summarize",
+        ]
+    )
+
+    runtime = captured_agent_kwargs["runtime"]
+    assert runtime.policy.shell_timeout == 41
+    assert runtime.policy.allow_outside_cwd is True
+    assert runtime.session.history_budget_chars == 765
+    assert captured_agent_kwargs["max_steps"] == 9
+    assert captured_agent_kwargs["max_tool_output_chars"] == 4321
+    assert captured_agent_kwargs["max_no_progress_steps"] == 4
 
 
 def test_main_without_task_enters_repl(monkeypatch, tmp_path, capsys):

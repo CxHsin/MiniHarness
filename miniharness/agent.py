@@ -7,11 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .capabilities import AgentCapabilities
 from .hooks import AgentHook, HookDispatcher, HookEvent
 from .model_client import ModelClient, ToolCall
+from .policy import RuntimePolicy
 from .prompts import build_system_prompt
+from .runtime import AgentRuntime
 from .session import Session
-from .tools.base import BaseTool, ToolContext, ToolRegistry, ToolResult
+from .tools.base import BaseTool, ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +39,27 @@ class Agent:
         shell_timeout: int = 30,
         allow_outside_cwd: bool = False,
         hooks: list[AgentHook] | None = None,
+        runtime: AgentRuntime | None = None,
     ):
+        # During the v0.2.1 transition, cwd is ignored when runtime is provided.
         self.model_client = model_client
         self.tools = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.max_steps = max_steps
         self.max_tool_output_chars = max_tool_output_chars
         self.max_no_progress_steps = max_no_progress_steps
-        self.session = Session(cwd=cwd, history_budget_chars=history_budget_chars)
-        self._history_budget_chars = history_budget_chars
-        self.context = ToolContext(
-            cwd=Path(cwd),
-            allow_outside_cwd=allow_outside_cwd,
-            shell_timeout=shell_timeout,
+        self.runtime = runtime or AgentRuntime.create(
+            cwd=cwd,
+            policy=RuntimePolicy(
+                allow_outside_cwd=allow_outside_cwd,
+                shell_timeout=shell_timeout,
+            ),
+            capabilities=AgentCapabilities(),
+            history_budget_chars=history_budget_chars,
+            hooks=hooks,
         )
-        self._dispatcher = HookDispatcher(hooks)
+        self.session = self.runtime.session
+        self.context = self.runtime.tool_context
+        self._dispatcher = HookDispatcher(self.runtime.hooks)
         self._run_id: str | None = None
 
     def run(self, task: str) -> AgentOutcome:
@@ -161,10 +171,11 @@ class Agent:
         return AgentOutcome(output, None, 0)
 
     def reset(self) -> None:
-        self.session = Session(
-            cwd=self.session.cwd,
-            history_budget_chars=self._history_budget_chars,
+        self.runtime.session = Session(
+            cwd=self.runtime.cwd,
+            history_budget_chars=self.runtime.session.history_budget_chars,
         )
+        self.session = self.runtime.session
 
     def _ensure_system_prompt(self) -> None:
         messages = self.session.get_messages()
