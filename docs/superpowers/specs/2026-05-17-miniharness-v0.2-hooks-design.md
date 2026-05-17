@@ -52,6 +52,8 @@ Add a new module such as `miniharness/hooks.py` with three core concepts:
 
 `HookEvent` is a small structured record representing one observed lifecycle event.
 
+In v0.2, `HookEvent` should be an immutable dataclass. This keeps the event envelope itself stable and easy to inspect in tests while leaving `payload` flexible for future event additions.
+
 Required fields:
 
 - `type`: stable event name, such as `tool.started`
@@ -62,6 +64,17 @@ Required fields:
 Optional future fields such as timestamp or elapsed milliseconds can be added later without changing the core dispatch shape.
 
 `run_id` should be generated inside `Agent.run()` with a fresh UUID per invocation so every event from one run can be correlated reliably.
+
+Suggested shape:
+
+```python
+@dataclass(frozen=True)
+class HookEvent:
+    type: str
+    run_id: str
+    step: int | None
+    payload: dict[str, Any]
+```
 
 ### AgentHook
 
@@ -85,6 +98,47 @@ One method is enough for v0.2. It keeps the interface stable and avoids a larger
 - Hook failures never abort the agent run.
 
 This prevents observability code from becoming a new failure path in the core loop.
+
+`HookDispatcher` is per-agent state created in `Agent.__init__()`. It does not need to be thread-safe in v0.2 because MiniHarness is currently a single-threaded CLI runtime. If MiniHarness is later embedded into a concurrent host, thread-safety can be revisited as a separate concern.
+
+When a hook raises, the dispatcher should record that failure with `logger.exception(...)` and continue dispatching to later hooks. Hook failures are developer errors and should be visible in logs when logging is enabled.
+
+## Payload Schemas
+
+Payloads stay lightweight in v0.2, but they should still use stable keys and native Python values rather than pre-serialized JSON strings.
+
+Event payloads should use these keys:
+
+- `run.started`
+  - `task: str`
+  - `max_steps: int`
+  - `model: str`
+- `step.started`
+  - `message_count: int`
+- `model.completed`
+  - `finish_reason: str | None`
+  - `tool_call_count: int`
+  - `has_tool_calls: bool`
+  - `has_content: bool`
+  - `is_continuation: bool`
+- `tool.started`
+  - `tool_name: str`
+  - `tool_call_id: str`
+  - `arguments_summary: str`
+- `tool.completed`
+  - `tool_name: str`
+  - `tool_call_id: str`
+  - `ok: bool`
+  - `truncated: bool`
+  - `error: str | None`
+- `run.completed`
+  - `steps_used: int`
+  - `used_continuation: bool`
+- `run.failed`
+  - `steps_used: int`
+  - `error: str`
+
+These payloads are intentionally minimal. Additional keys can be added later, but v0.2 implementations and tests should treat the keys above as the stable baseline.
 
 ## Event Model
 
@@ -115,10 +169,11 @@ This is enough for useful trace output while keeping the event vocabulary small.
 `model.completed`
 
 - Emitted after one model response is received
-- Payload includes `finish_reason`, whether tool calls were present, and tool call count
+- Payload includes `finish_reason`, whether tool calls were present, tool call count, whether content was present, and whether the response came from the continuation path
 - Continuation responses triggered by `finish_reason="length"` also emit `model.completed`
 - This event represents one consumed `model_client.complete()` result after any internal client retries, not one raw HTTP attempt
 - v0.2 intentionally omits `model.started`, so long model waits may appear silent between `step.started` and `model.completed`
+- This event fires for every consumed model response, even when `content` is empty and `tool_calls` is empty
 
 `tool.started`
 
@@ -165,6 +220,11 @@ Agent(
 
 Internally, the constructor normalizes this to a dispatcher so the rest of the class can call one method, such as `_emit(event_type, step, payload)`.
 
+The lifecycle split should be explicit:
+
+- `_dispatcher` is created once in `Agent.__init__()`
+- `_run_id` is created fresh at the start of each `run()`
+
 The existing control flow in `Agent.run()` remains intact. The only new responsibility is emitting events at the key lifecycle points above.
 
 Important integration rules:
@@ -175,6 +235,20 @@ Important integration rules:
 - `reset()` does not need hook events in v0.2 because hooks are scoped to a run, not general agent state mutation.
 - The continuation path in `_continue_truncated_final_answer()` should emit a second `model.completed` event and never emit `tool.started` or `tool.completed`, because that request uses `tool_choice="none"`.
 - Every `model_client.complete()` invocation should emit exactly one `model.completed`, including the continuation call after a truncated answer.
+- `KeyboardInterrupt` is not modeled as a hook event in v0.2. It is treated as an external process interruption handled by the CLI rather than a normal agent outcome.
+
+## Continuation Path Coverage
+
+The continuation path in `_continue_truncated_final_answer()` is part of the hook surface and should not be treated as invisible internal logic.
+
+Rules for continuation coverage:
+
+- The initial truncated response emits `model.completed` with `finish_reason="length"` and `is_continuation=False`
+- The follow-up continuation request emits its own `model.completed` with `is_continuation=True`
+- The continuation response reuses the triggering loop step number so it stays grouped with the step that caused the continuation
+- The continuation path never emits `step.started` because it runs after the loop step has already completed
+- If the continuation succeeds, the run ends with `run.completed`
+- If the continuation is still truncated or unexpectedly contains tool calls, the run ends with `run.failed`
 
 ## CLI Integration
 
@@ -199,6 +273,12 @@ Behavior by mode:
 - `load_config()` copies `args.trace` into `Config.trace`
 - `_build_agent()` constructs a `ConsoleHook` when `config.trace` is true and passes it into `Agent`
 
+`--trace` and `--verbose` are fully orthogonal:
+
+- `--trace` controls whether `ConsoleHook` is attached
+- `--verbose` and `--log-level` control logger output
+- When both are enabled, both trace lines and logger lines may appear
+
 ### ConsoleHook
 
 `ConsoleHook` is a built-in hook implementation for human-readable stderr output and should live in `miniharness/hooks.py` alongside the event and dispatcher types.
@@ -218,14 +298,18 @@ Design constraints:
 
 - Output goes to stderr only.
 - Lines should stay concise and avoid dumping full JSON arguments.
+- Long `arguments_summary` values should be truncated again for display if needed; the console format should favor readability over exact payload reproduction.
 - Final assistant content must still go only to stdout.
 - The trace should help a human follow execution, not mirror the full message history.
 - Trace lines and ordinary CLI error lines may both appear on stderr. This mixing is acceptable in v0.2 as long as stdout remains reserved for the final answer.
 - User-facing step numbers in trace output should be 1-based even though the internal loop counter is 0-based.
 - The continuation `model.completed` event should render with the triggering step number so it does not appear orphaned in trace output, for example `[step 3] model completed (continuation)`.
 - `run.completed` and `run.failed` should render differently so success and failure are visually distinguishable at a glance.
+- Console output should use a simple `f"[step {step}]"` prefix with no alignment padding.
 
 The CLI remains the owner of presentation. The agent only emits structured events.
+
+The existing `logger.info("tool call: %s", tool_call.name)` behavior may remain in v0.2 for backward compatibility. Hooks become the preferred user-facing observability path, while logger-based tool lines can be simplified or removed in a later version once trace output is established.
 
 ## Compatibility
 
@@ -255,8 +339,9 @@ Add tests that verify:
 - Failing runs emit `run.failed`.
 - Tool argument parse errors still emit a completed tool event with failure metadata.
 - Runs with truncated tool output mark that truncation in the emitted tool payload.
+- Continuation responses emit a second `model.completed` with `is_continuation=True`.
 
-Use a recording hook in tests to capture emitted events and assert only on stable fields, not presentation strings.
+Use a recording hook in tests to capture emitted events and assert on stable event fields and key payload values, not presentation strings.
 
 ### Dispatcher Tests
 
@@ -265,6 +350,7 @@ Add tests that verify:
 - Dispatch with no hooks is a no-op.
 - Multiple hooks receive the same event in registration order.
 - One hook raising an exception does not prevent later hooks from running.
+- Hook exceptions are logged.
 
 ### CLI Tests
 
