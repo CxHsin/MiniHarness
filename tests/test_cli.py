@@ -55,7 +55,7 @@ def test_main_prints_version(capsys):
         cli.main(["--version"])
 
     assert exc.value.code == 0
-    assert "mh 0.2.1" in capsys.readouterr().out
+    assert "mh 0.2.2" in capsys.readouterr().out
 
 
 def test_main_requires_api_key_for_task(monkeypatch, tmp_path, capsys):

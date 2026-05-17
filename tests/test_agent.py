@@ -24,12 +24,27 @@ class EchoTool(Tool):
         return ToolResult(True, text, None)
 
 
+class MetadataEchoTool(Tool):
+    name = "metadata_echo"
+    description = "echo input with metadata"
+    parameters = {"type": "object", "properties": {"text": {"type": "string"}}}
+
+    def execute(self, args, context: ToolContext) -> ToolResult:
+        text = args.get("text", "")
+        return ToolResult(True, text, None, {"source": "metadata_echo", "size": len(text)})
+
+
 class RecordingHook:
     def __init__(self):
         self.events: list[HookEvent] = []
 
     def handle(self, event: HookEvent) -> None:
         self.events.append(event)
+
+
+class FailingExecuteRegistry(ToolRegistry):
+    def execute(self, name: str, args: dict, context: ToolContext) -> ToolResult:
+        raise AssertionError("registry execute should not be reached")
 
 
 def test_agent_returns_final_answer_without_tool_calls(tmp_path):
@@ -200,6 +215,95 @@ def test_agent_accepts_tool_registry_and_validates_arguments(tmp_path):
     assert "invalid arguments" in content["error"]
 
 
+def test_agent_denies_shell_when_runtime_policy_disables_shell(tmp_path):
+    recorder = RecordingHook()
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments={"command": "echo hello"},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(shell_enabled=False),
+        capabilities=AgentCapabilities(),
+        hooks=[recorder],
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[EchoTool()],
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    tool_completed = [event for event in recorder.events if event.type == "tool.completed"][0]
+    assert tool_completed.payload["ok"] is False
+    assert "disabled by runtime policy" in tool_completed.payload["error"]
+    assert [event.type for event in recorder.events] == [
+        "run.started",
+        "step.started",
+        "model.completed",
+        "tool.started",
+        "tool.completed",
+        "step.started",
+        "model.completed",
+        "run.completed",
+    ]
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is False
+    assert "disabled by runtime policy" in content["error"]
+
+
+def test_agent_denied_shell_does_not_fall_through_to_registry_execute(tmp_path):
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments={"command": "echo hello"},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(shell_enabled=False),
+        capabilities=AgentCapabilities(),
+    )
+    agent = Agent(
+        model_client=model,
+        tools=FailingExecuteRegistry([EchoTool()]),
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is False
+    assert "disabled by runtime policy" in content["error"]
+
+
 def test_agent_executes_all_tool_calls_despite_partial_failure(tmp_path):
     model = FakeModelClient(
         [
@@ -252,6 +356,33 @@ def test_agent_stops_after_repeated_no_progress(tmp_path):
 
 
 def test_agent_truncates_tool_output_with_marker(tmp_path):
+    long_text = "abcdefghij" * 20
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(id="call_1", name="echo", arguments={"text": long_text})
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[EchoTool()],
+        cwd=tmp_path,
+        max_tool_output_chars=80,
+    )
+
+    agent.run("hello")
+
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert "output truncated at 80 chars" in content["output"]
+
+
+def test_agent_truncated_tool_output_never_exceeds_limit(tmp_path):
     model = FakeModelClient(
         [
             ModelResponse(
@@ -274,7 +405,39 @@ def test_agent_truncates_tool_output_with_marker(tmp_path):
     agent.run("hello")
 
     content = json.loads(model.calls[1]["messages"][-1]["content"])
-    assert "output truncated at 8 chars" in content["output"]
+    assert len(content["output"]) <= 8
+
+
+def test_agent_truncation_preserves_tool_metadata(tmp_path):
+    long_text = "abcdefghij" * 20
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="metadata_echo",
+                        arguments={"text": long_text},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[MetadataEchoTool()],
+        cwd=tmp_path,
+        max_tool_output_chars=8,
+    )
+
+    agent.run("hello")
+
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert len(content["output"]) <= 8
+    assert content["metadata"] == {"source": "metadata_echo", "size": len(long_text)}
 
 
 def test_agent_emits_events_for_tool_run(tmp_path):

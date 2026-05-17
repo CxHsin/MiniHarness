@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Added `RuntimePolicy.shell_enabled` and `miniharness.permissions` for runtime permission decisions.
+- Deny `run_shell` at the agent execution boundary when shell access is disabled by runtime policy.
+- Hardened tool-output truncation so capped output stays within the configured limit and preserves metadata.
+
 ## 0.2.1
 
 - Added `RuntimePolicy`, `AgentCapabilities`, and `AgentRuntime` as the initial system runtime scaffold.

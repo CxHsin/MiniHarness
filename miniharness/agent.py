@@ -9,6 +9,7 @@ from typing import Any
 
 from .capabilities import AgentCapabilities
 from .hooks import AgentHook, HookDispatcher, HookEvent
+from .permissions import check_tool_permission
 from .model_client import ModelClient, ToolCall
 from .policy import RuntimePolicy
 from .prompts import build_system_prompt
@@ -203,6 +204,13 @@ class Agent:
     def _execute_tool_call(self, tool_call: ToolCall) -> ToolResult:
         if tool_call.parse_error:
             return ToolResult(False, "", f"invalid tool arguments: {tool_call.parse_error}")
+        decision = check_tool_permission(
+            self.runtime.policy,
+            tool_call.name,
+            tool_call.arguments,
+        )
+        if not decision.allowed:
+            return ToolResult(False, "", decision.error)
         try:
             return self.tools.execute(tool_call.name, tool_call.arguments, self.context)
         except KeyboardInterrupt:
@@ -217,10 +225,12 @@ class Agent:
             return result
         omitted = len(output) - limit
         marker = f"\n... [output truncated at {limit} chars, {omitted} characters omitted] ...\n"
+        if len(marker) >= limit:
+            return ToolResult(result.ok, marker[:limit], result.error, result.metadata)
         head_len = max((limit - len(marker)) // 2, 0)
         tail_len = max(limit - len(marker) - head_len, 0)
         truncated = output[:head_len] + marker + output[-tail_len if tail_len else len(output) :]
-        return ToolResult(result.ok, truncated, result.error)
+        return ToolResult(result.ok, truncated, result.error, result.metadata)
 
     def _emit(self, event_type: str, step: int | None, payload: dict[str, Any]) -> None:
         self._dispatcher.emit(
