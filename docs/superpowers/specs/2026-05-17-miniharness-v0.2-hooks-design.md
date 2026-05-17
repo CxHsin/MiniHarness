@@ -61,6 +61,8 @@ Required fields:
 
 Optional future fields such as timestamp or elapsed milliseconds can be added later without changing the core dispatch shape.
 
+`run_id` should be generated inside `Agent.run()` with a fresh UUID per invocation so every event from one run can be correlated reliably.
+
 ### AgentHook
 
 `AgentHook` is a minimal protocol or abstract base class:
@@ -114,16 +116,19 @@ This is enough for useful trace output while keeping the event vocabulary small.
 
 - Emitted after one model response is received
 - Payload includes `finish_reason`, whether tool calls were present, and tool call count
+- Continuation responses triggered by `finish_reason="length"` also emit `model.completed`
 
 `tool.started`
 
 - Emitted before a single tool call executes
 - Payload includes tool name, tool call id, and arguments summary
+- This event fires even when argument parsing later fails, so every tool attempt is bracketed by `tool.started` and `tool.completed`
 
 `tool.completed`
 
 - Emitted after a single tool call finishes, even on tool failure
 - Payload includes tool name, tool call id, `ok`, whether output was truncated, and any short error string
+- Payload reflects the post-truncation result that is appended to message history
 
 `run.completed`
 
@@ -164,6 +169,7 @@ Important integration rules:
 - Tool parse errors should still surface through `tool.completed` with `ok=False`.
 - Output truncation should be observable through `tool.completed` payload metadata rather than by introducing a separate truncation event.
 - `reset()` does not need hook events in v0.2 because hooks are scoped to a run, not general agent state mutation.
+- The continuation path in `_continue_truncated_final_answer()` should emit a second `model.completed` event and never emit `tool.started` or `tool.completed`, because that request uses `tool_choice="none"`.
 
 ## CLI Integration
 
@@ -181,9 +187,11 @@ Behavior by mode:
 
 `--trace` should be independent from `--verbose`. Users may want a clean execution trace without full logger noise.
 
+`--trace` is a CLI concern first. `load_config()` should surface a boolean trace flag, and `_build_agent()` should wire a `ConsoleHook` into the agent when that flag is set.
+
 ### ConsoleHook
 
-`ConsoleHook` is a built-in hook implementation for human-readable stderr output.
+`ConsoleHook` is a built-in hook implementation for human-readable stderr output and should live in `miniharness/hooks.py` alongside the event and dispatcher types.
 
 It should produce compact lines such as:
 
@@ -214,6 +222,8 @@ This increment should be backward-compatible by default:
 - REPL behavior stays the same unless `--trace` is enabled for that process.
 
 Hooks are additive. When no hooks are attached, the runtime behavior should be functionally identical to v0.1.2.
+
+The `step` field uses the current loop iteration number for normal events. For the continuation call after a truncated final answer, the emitted `model.completed` event should reuse the same step number as the truncated response it continues, so the two responses stay grouped in trace output.
 
 ## Testing Strategy
 
