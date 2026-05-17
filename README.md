@@ -6,7 +6,7 @@ MiniHarness 是一个小型、本地运行的 CLI Agent。它使用 OpenAI-compa
 
 ## 最新状态
 
-- 当前版本：`0.1.1`
+- 当前版本：`0.1.2`
 - 当前入口：`mh`
 - 当前运行模式：一次性任务模式和交互 REPL
 - 当前模型接口：OpenAI-compatible Chat Completions API
@@ -177,6 +177,8 @@ MiniHarness 的 agent loop 会：
 
 ### Tools
 
+MiniHarness v0.1.2 引入了轻量工具注册表。Agent 通过 `ToolRegistry` 获取工具、导出 OpenAI tool schema，并在执行前做基础参数校验。这个设计保留了 MiniHarness 的轻量实现，同时让工具系统更接近 OpenHarness 的注册和调度模型。
+
 | 工具 | 说明 |
 | --- | --- |
 | `list_dir` | 列出目录，目录优先，最多返回 500 项 |
@@ -196,6 +198,8 @@ MiniHarness 的 agent loop 会：
   "metadata": {}
 }
 ```
+
+工具参数校验覆盖 `required`、基础 JSON 类型、`minimum`、`maximum` 和 `enum`。校验失败时，工具不会进入自身执行逻辑，而是统一返回 `invalid arguments: ...`。
 
 ### Session / Context
 

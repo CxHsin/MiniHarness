@@ -7,7 +7,7 @@ from . import __version__
 from .agent import Agent, AgentOutcome
 from .config import load_config
 from .model_client import OpenAIModelClient
-from .tools import TOOLS
+from .tools import TOOL_REGISTRY
 
 
 def positive_int(value: str) -> int:
@@ -79,7 +79,7 @@ def _build_agent(config) -> Agent:
     model_client = OpenAIModelClient(config.api_key, config.model, config.base_url)
     return Agent(
         model_client=model_client,
-        tools=TOOLS,
+        tools=TOOL_REGISTRY,
         cwd=config.cwd,
         max_steps=config.max_steps,
         max_tool_output_chars=config.max_tool_output_chars,

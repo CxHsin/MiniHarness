@@ -9,7 +9,7 @@ from typing import Any
 from .model_client import ModelClient, ToolCall
 from .prompts import build_system_prompt
 from .session import Session
-from .tools.base import BaseTool, ToolContext, ToolResult
+from .tools.base import BaseTool, ToolContext, ToolRegistry, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class Agent:
     def __init__(
         self,
         model_client: ModelClient,
-        tools: list[BaseTool],
+        tools: list[BaseTool] | ToolRegistry,
         cwd: str | Path,
         max_steps: int = 8,
         max_tool_output_chars: int = 12000,
@@ -35,7 +35,7 @@ class Agent:
         allow_outside_cwd: bool = False,
     ):
         self.model_client = model_client
-        self.tools = {tool.name: tool for tool in tools}
+        self.tools = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.max_steps = max_steps
         self.max_tool_output_chars = max_tool_output_chars
         self.max_no_progress_steps = max_no_progress_steps
@@ -54,7 +54,7 @@ class Agent:
         for _step in range(self.max_steps):
             response = self.model_client.complete(
                 self.session.get_messages(),
-                [tool.to_openai_tool() for tool in self.tools.values()],
+                self.tools.to_openai_tools(),
                 tool_choice="auto",
             )
             if response.finish_reason == "length":
@@ -102,7 +102,7 @@ class Agent:
         )
         response = self.model_client.complete(
             self.session.get_messages(),
-            [tool.to_openai_tool() for tool in self.tools.values()],
+            self.tools.to_openai_tools(),
             tool_choice="none",
         )
         output = partial + (response.content or "")
@@ -144,11 +144,8 @@ class Agent:
     def _execute_tool_call(self, tool_call: ToolCall) -> ToolResult:
         if tool_call.parse_error:
             return ToolResult(False, "", f"invalid tool arguments: {tool_call.parse_error}")
-        tool = self.tools.get(tool_call.name)
-        if tool is None:
-            return ToolResult(False, "", f"unknown tool: {tool_call.name}")
         try:
-            return tool.execute(tool_call.arguments, self.context)
+            return self.tools.execute(tool_call.name, tool_call.arguments, self.context)
         except KeyboardInterrupt:
             raise
         except Exception as exc:

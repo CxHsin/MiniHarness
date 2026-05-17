@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2
+
+- Added a lightweight `ToolRegistry` for registration, lookup, dispatch, and OpenAI schema export.
+- Added JSON Schema subset validation before tool execution.
+- Added `ToolResult.is_error` as an OpenHarness-style compatibility property.
+- Updated Agent and CLI wiring to use the registry-driven tool system.
+
 ## 0.1.1
 
 - Added one-step continuation for truncated final model answers.

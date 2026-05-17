@@ -4,7 +4,7 @@ from tests.conftest import FakeModelClient
 
 from miniharness.agent import Agent
 from miniharness.model_client import ModelResponse, ToolCall
-from miniharness.tools.base import Tool, ToolContext, ToolResult
+from miniharness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
 
 class EchoTool(Tool):
@@ -125,6 +125,27 @@ def test_agent_serializes_tool_result_as_json_content(tmp_path):
         "error": None,
         "metadata": {},
     }
+
+
+def test_agent_accepts_tool_registry_and_validates_arguments(tmp_path):
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": 123})],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(model_client=model, tools=ToolRegistry([EchoTool()]), cwd=tmp_path)
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is False
+    assert "invalid arguments" in content["error"]
 
 
 def test_agent_executes_all_tool_calls_despite_partial_failure(tmp_path):
