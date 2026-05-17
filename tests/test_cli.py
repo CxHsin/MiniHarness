@@ -24,6 +24,14 @@ def test_parser_verbose_sets_log_level_info():
     assert args.verbose is True
 
 
+def test_parser_accepts_trace_flag():
+    parser = build_parser()
+
+    args = parser.parse_args(["--trace", "summarize"])
+
+    assert args.trace is True
+
+
 def test_parser_rejects_negative_max_steps():
     parser = build_parser()
 
@@ -62,10 +70,11 @@ def test_main_requires_api_key_for_task(monkeypatch, tmp_path, capsys):
 
 def test_main_prints_final_answer_to_stdout(monkeypatch, tmp_path, capsys):
     captured_client_args = {}
+    captured_agent_kwargs = {}
 
     class FakeAgent:
         def __init__(self, **kwargs):
-            pass
+            captured_agent_kwargs.update(kwargs)
 
         def run(self, task):
             return cli.AgentOutcome(output="final answer", error=None, exit_code=0)
@@ -100,6 +109,46 @@ def test_main_prints_final_answer_to_stdout(monkeypatch, tmp_path, capsys):
         "model": "qwen",
         "base_url": "http://localhost:11434/v1",
     }
+    assert captured_agent_kwargs["hooks"] is None
+
+
+def test_main_trace_wires_console_hook_and_keeps_stdout_clean(monkeypatch, tmp_path, capsys):
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self._hook = kwargs["hooks"][0]
+
+        def run(self, task):
+            self._hook.handle(
+                cli.HookEvent(
+                    type="run.started",
+                    run_id="abc",
+                    step=None,
+                    payload={"task": task, "max_steps": 8, "model": "fake-model"},
+                )
+            )
+            self._hook.handle(
+                cli.HookEvent(
+                    type="run.completed",
+                    run_id="abc",
+                    step=None,
+                    payload={"steps_used": 1, "used_continuation": False},
+                )
+            )
+            return cli.AgentOutcome(output="final answer", error=None, exit_code=0)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+
+    code = cli.main(["--trace", "--cwd", str(tmp_path), "summarize"])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert captured.out == "final answer\n"
+    assert "[run] started" in captured.err
+    assert "[run] run.completed" not in captured.err
 
 
 def test_main_without_task_enters_repl(monkeypatch, tmp_path, capsys):

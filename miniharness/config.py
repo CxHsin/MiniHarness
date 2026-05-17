@@ -21,6 +21,7 @@ class Config:
     max_no_progress_steps: int = 2
     log_level: str = "WARNING"
     allow_outside_cwd: bool = False
+    trace: bool = False
 
 
 def load_config(args: Any, env_path: str | Path | None = None) -> Config:
@@ -55,4 +56,5 @@ def load_config(args: Any, env_path: str | Path | None = None) -> Config:
         max_no_progress_steps=args.max_no_progress_steps,
         log_level=log_level,
         allow_outside_cwd=args.allow_outside_cwd,
+        trace=getattr(args, "trace", False),
     )

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from . import __version__
 from .agent import Agent, AgentOutcome
 from .config import load_config
+from .hooks import ConsoleHook, HookEvent
 from .model_client import OpenAIModelClient
 from .tools import TOOL_REGISTRY
 
@@ -44,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="WARNING",
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="print structured execution trace to stderr",
+    )
     parser.add_argument("--allow-outside-cwd", action="store_true")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -77,6 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _build_agent(config) -> Agent:
     model_client = OpenAIModelClient(config.api_key, config.model, config.base_url)
+    hooks = [ConsoleHook()] if config.trace else None
     return Agent(
         model_client=model_client,
         tools=TOOL_REGISTRY,
@@ -87,6 +94,7 @@ def _build_agent(config) -> Agent:
         max_no_progress_steps=config.max_no_progress_steps,
         shell_timeout=config.shell_timeout,
         allow_outside_cwd=config.allow_outside_cwd,
+        hooks=hooks,
     )
 
 

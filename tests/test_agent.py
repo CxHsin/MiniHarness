@@ -1,8 +1,10 @@
 import json
+import pytest
 
 from tests.conftest import FakeModelClient
 
 from miniharness.agent import Agent
+from miniharness.hooks import HookEvent
 from miniharness.model_client import ModelResponse, ToolCall
 from miniharness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
@@ -17,6 +19,14 @@ class EchoTool(Tool):
         if text == "fail":
             return ToolResult(False, "", "failed on purpose")
         return ToolResult(True, text, None)
+
+
+class RecordingHook:
+    def __init__(self):
+        self.events: list[HookEvent] = []
+
+    def handle(self, event: HookEvent) -> None:
+        self.events.append(event)
 
 
 def test_agent_returns_final_answer_without_tool_calls(tmp_path):
@@ -223,3 +233,136 @@ def test_agent_truncates_tool_output_with_marker(tmp_path):
 
     content = json.loads(model.calls[1]["messages"][-1]["content"])
     assert "output truncated at 8 chars" in content["output"]
+
+
+def test_agent_emits_events_for_tool_run(tmp_path):
+    recorder = RecordingHook()
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "hi"})],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path, hooks=[recorder])
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    assert [event.type for event in recorder.events] == [
+        "run.started",
+        "step.started",
+        "model.completed",
+        "tool.started",
+        "tool.completed",
+        "step.started",
+        "model.completed",
+        "run.completed",
+    ]
+    assert recorder.events[0].payload["task"] == "hello"
+    assert recorder.events[0].payload["max_steps"] == 8
+    assert recorder.events[0].payload["model"] == "unknown"
+    assert recorder.events[2].payload["has_tool_calls"] is True
+    assert recorder.events[4].payload["ok"] is True
+    assert recorder.events[-1].payload["steps_used"] == 2
+    assert recorder.events[-1].payload["used_continuation"] is False
+
+
+def test_agent_emits_failed_tool_event_for_invalid_arguments(tmp_path):
+    recorder = RecordingHook()
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": 123})],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path, hooks=[recorder])
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    assert recorder.events[3].type == "tool.started"
+    assert recorder.events[4].type == "tool.completed"
+    assert recorder.events[4].payload["ok"] is False
+    assert "invalid arguments" in recorder.events[4].payload["error"]
+
+
+def test_agent_marks_truncated_tool_output_in_event_payload(tmp_path):
+    recorder = RecordingHook()
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[ToolCall(id="call_1", name="echo", arguments={"text": "abcdefghij"})],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[EchoTool()],
+        cwd=tmp_path,
+        max_tool_output_chars=8,
+        hooks=[recorder],
+    )
+
+    agent.run("hello")
+
+    tool_completed = [event for event in recorder.events if event.type == "tool.completed"][0]
+    assert tool_completed.payload["truncated"] is True
+
+
+def test_agent_emits_continuation_model_event(tmp_path):
+    recorder = RecordingHook()
+    model = FakeModelClient(
+        [
+            ModelResponse(content="partial ", finish_reason="length"),
+            ModelResponse(content="answer", finish_reason="stop"),
+        ]
+    )
+    agent = Agent(model_client=model, tools=[EchoTool()], cwd=tmp_path, hooks=[recorder])
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    model_events = [event for event in recorder.events if event.type == "model.completed"]
+    assert len(model_events) == 2
+    assert model_events[0].payload["is_continuation"] is False
+    assert model_events[1].payload["is_continuation"] is True
+    assert recorder.events[-1].type == "run.completed"
+    assert recorder.events[-1].payload["used_continuation"] is True
+
+
+def test_agent_emits_run_failed_before_reraising_unexpected_model_error(tmp_path):
+    recorder = RecordingHook()
+
+    class ExplodingModelClient:
+        model = "boom-model"
+
+        def complete(self, messages, tools, tool_choice="auto"):
+            raise RuntimeError("network exploded")
+
+    agent = Agent(
+        model_client=ExplodingModelClient(),
+        tools=[EchoTool()],
+        cwd=tmp_path,
+        hooks=[recorder],
+    )
+
+    with pytest.raises(RuntimeError, match="network exploded"):
+        agent.run("hello")
+
+    assert [event.type for event in recorder.events] == [
+        "run.started",
+        "step.started",
+        "run.failed",
+    ]
+    assert recorder.events[-1].payload["error"] == "network exploded"

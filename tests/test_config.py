@@ -19,6 +19,7 @@ def test_load_config_prefers_cli_over_environment(monkeypatch, tmp_path):
         log_level="DEBUG",
         verbose=False,
         allow_outside_cwd=True,
+        trace=True,
     )
 
     config = load_config(args, env_path=tmp_path / ".env")
@@ -33,6 +34,7 @@ def test_load_config_prefers_cli_over_environment(monkeypatch, tmp_path):
     assert config.max_no_progress_steps == 1
     assert config.log_level == "DEBUG"
     assert config.allow_outside_cwd is True
+    assert config.trace is True
 
 
 def test_load_config_uses_dotenv_before_defaults(monkeypatch, tmp_path):
@@ -58,6 +60,7 @@ def test_load_config_uses_dotenv_before_defaults(monkeypatch, tmp_path):
         log_level="WARNING",
         verbose=True,
         allow_outside_cwd=False,
+        trace=False,
     )
 
     config = load_config(args, env_path=env_path)
@@ -66,3 +69,4 @@ def test_load_config_uses_dotenv_before_defaults(monkeypatch, tmp_path):
     assert config.model == "dotenv-model"
     assert config.base_url == "https://dotenv.example/v1"
     assert config.log_level == "INFO"
+    assert config.trace is False
