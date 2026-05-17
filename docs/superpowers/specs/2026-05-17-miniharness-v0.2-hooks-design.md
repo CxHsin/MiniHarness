@@ -65,6 +65,8 @@ Optional future fields such as timestamp or elapsed milliseconds can be added la
 
 `run_id` should be generated inside `Agent.run()` with a fresh UUID per invocation so every event from one run can be correlated reliably.
 
+In v0.2, `run_id` primarily exists for future sinks and testability. `uuid.uuid4().hex` is an acceptable default even though `ConsoleHook` does not display it.
+
 Suggested shape:
 
 ```python
@@ -102,6 +104,8 @@ This prevents observability code from becoming a new failure path in the core lo
 `HookDispatcher` is per-agent state created in `Agent.__init__()`. It does not need to be thread-safe in v0.2 because MiniHarness is currently a single-threaded CLI runtime. If MiniHarness is later embedded into a concurrent host, thread-safety can be revisited as a separate concern.
 
 When a hook raises, the dispatcher should record that failure with `logger.exception(...)` and continue dispatching to later hooks. Hook failures are developer errors and should be visible in logs when logging is enabled.
+
+When no hooks are attached, v0.2 should still allow the agent to construct and emit `HookEvent` objects normally. Avoiding those small allocations is not worth additional branching or complexity in this version.
 
 ## Payload Schemas
 
@@ -224,13 +228,16 @@ The lifecycle split should be explicit:
 
 - `_dispatcher` is created once in `Agent.__init__()`
 - `_run_id` is created fresh at the start of each `run()`
+- Event ordering correctness, including avoiding duplicate terminal events, is the emitter's responsibility rather than the dispatcher's responsibility
 
 The existing control flow in `Agent.run()` remains intact. The only new responsibility is emitting events at the key lifecycle points above.
 
 Important integration rules:
 
+- `Agent.run()` should ensure unexpected exceptions still produce a terminal `run.failed` event before the exception is re-raised to the CLI.
 - Hook emission must happen inside the existing success and failure branches so terminal events always reflect the real outcome.
 - Tool parse errors should still surface through `tool.completed` with `ok=False`.
+- `tool.completed(ok=False)` covers argument parse failures, schema validation failures, and execution failures.
 - Output truncation should be observable through `tool.completed` payload metadata rather than by introducing a separate truncation event.
 - `reset()` does not need hook events in v0.2 because hooks are scoped to a run, not general agent state mutation.
 - The continuation path in `_continue_truncated_final_answer()` should emit a second `model.completed` event and never emit `tool.started` or `tool.completed`, because that request uses `tool_choice="none"`.
@@ -249,6 +256,31 @@ Rules for continuation coverage:
 - The continuation path never emits `step.started` because it runs after the loop step has already completed
 - If the continuation succeeds, the run ends with `run.completed`
 - If the continuation is still truncated or unexpectedly contains tool calls, the run ends with `run.failed`
+
+## Event Path Mapping
+
+The intended event paths for v0.2 are:
+
+- Final answer without tools:
+  `run.started -> step.started -> model.completed -> run.completed`
+- Tool round followed by final answer:
+  `run.started -> step.started -> model.completed -> (tool.started -> tool.completed)* -> ... -> run.completed`
+- Truncated answer with successful continuation:
+  `run.started -> step.started -> model.completed(length) -> model.completed(is_continuation=True) -> run.completed`
+- Truncated answer with failed continuation:
+  `run.started -> step.started -> model.completed(length) -> model.completed(is_continuation=True) -> run.failed`
+- Repeated no-progress termination:
+  `run.started -> ... -> step.started -> model.completed -> (tool.started -> tool.completed(ok=False))+ -> run.failed`
+- Maximum-step termination:
+  `run.started -> ... -> step.started -> model.completed -> (optional tool events) -> run.failed`
+- Unexpected exception inside `run()`:
+  `run.started -> ... -> run.failed`, followed by the exception being re-raised
+
+Within one model response containing multiple tool calls, v0.2 guarantees sequential per-tool event bracketing:
+
+`tool.started(A) -> tool.completed(A) -> tool.started(B) -> tool.completed(B)`
+
+This matches the existing sequential execution model and should be treated as part of the v0.2 behavior.
 
 ## CLI Integration
 
@@ -272,6 +304,7 @@ Behavior by mode:
 - `Config` adds `trace: bool = False`
 - `load_config()` copies `args.trace` into `Config.trace`
 - `_build_agent()` constructs a `ConsoleHook` when `config.trace` is true and passes it into `Agent`
+- v0.2 does not add an environment-variable or `.env` fallback for trace mode; `--trace` is CLI flag only
 
 `--trace` and `--verbose` are fully orthogonal:
 
@@ -283,6 +316,8 @@ Behavior by mode:
 
 `ConsoleHook` is a built-in hook implementation for human-readable stderr output and should live in `miniharness/hooks.py` alongside the event and dispatcher types.
 
+`ConsoleHook` should be implemented as a class with a `handle()` method rather than as a bare function so future presentation state can be added without changing the hook interface.
+
 It should produce compact lines such as:
 
 ```text
@@ -290,6 +325,7 @@ It should produce compact lines such as:
 [step 1] model completed with 2 tool calls
 [step 1] tool read_file started
 [step 1] tool read_file completed ok
+[step 1] tool read_file failed: permission denied
 [run] completed in 2 steps
 [run] failed: maximum agent steps reached
 ```
@@ -298,14 +334,19 @@ Design constraints:
 
 - Output goes to stderr only.
 - Lines should stay concise and avoid dumping full JSON arguments.
+- If `arguments_summary` contains escaped multi-line content, `ConsoleHook` should still render a single-line event. It should not expand embedded newlines back into multiple lines.
 - Long `arguments_summary` values should be truncated again for display if needed; the console format should favor readability over exact payload reproduction.
 - Final assistant content must still go only to stdout.
 - The trace should help a human follow execution, not mirror the full message history.
 - Trace lines and ordinary CLI error lines may both appear on stderr. This mixing is acceptable in v0.2 as long as stdout remains reserved for the final answer.
-- User-facing step numbers in trace output should be 1-based even though the internal loop counter is 0-based.
+- `HookEvent.step` is 0-based to match the agent loop; user-facing step numbers in trace output should be converted to 1-based.
 - The continuation `model.completed` event should render with the triggering step number so it does not appear orphaned in trace output, for example `[step 3] model completed (continuation)`.
 - `run.completed` and `run.failed` should render differently so success and failure are visually distinguishable at a glance.
 - Console output should use a simple `f"[step {step}]"` prefix with no alignment padding.
+- When `event.step is None`, `ConsoleHook` should use a `[run]` prefix rather than a step prefix.
+- `ConsoleHook` should intentionally omit `run_id` and `tool_call_id` from human-facing lines to avoid low-signal noise in v0.2.
+- `run.started` may include a shortened task preview for display, but the event payload should retain the full task text. A preview of roughly 120 characters is sufficient.
+- v0.2 trace output remains plain text only. ANSI color and richer terminal styling are deferred.
 
 The CLI remains the owner of presentation. The agent only emits structured events.
 
@@ -326,6 +367,14 @@ The `step` field uses the current loop iteration number for normal events. For t
 
 In REPL mode, hooks are attached when the `Agent` is constructed for the session and reused across turns. Each `agent.run()` invocation emits its own fresh event stream with a new `run_id`.
 
+Calling `reset()` replaces the session state but does not replace or disable hooks. The same dispatcher remains active for subsequent runs on that `Agent`.
+
+The public `miniharness.hooks` API for v0.2 should export:
+
+```python
+__all__ = ["HookEvent", "AgentHook", "HookDispatcher", "ConsoleHook"]
+```
+
 ## Testing Strategy
 
 Testing should cover the hook layer directly and through the CLI.
@@ -343,6 +392,8 @@ Add tests that verify:
 
 Use a recording hook in tests to capture emitted events and assert on stable event fields and key payload values, not presentation strings.
 
+Key payload assertions should include values such as the original task on `run.started`, `ok=False` on failed `tool.completed`, `truncated=True` when output was shortened, and `is_continuation=True` on the continuation response event.
+
 ### Dispatcher Tests
 
 Add tests that verify:
@@ -359,6 +410,8 @@ Add tests that verify:
 - `--trace` produces stderr progress output.
 - `--trace` does not contaminate stdout final answers.
 - Default mode still avoids trace lines.
+
+For CLI capture tests, prefer `capsys`-based assertions on stdout and stderr separately rather than subprocess-based end-to-end capture.
 
 ## Acceptance Criteria
 
