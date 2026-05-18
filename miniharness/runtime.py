@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .approvals import ApprovalHandler, DenyingApprovalHandler
 from .capabilities import AgentCapabilities
 from .hooks import AgentHook
 from .policy import RuntimePolicy
@@ -18,6 +19,7 @@ class AgentRuntime:
     policy: RuntimePolicy
     capabilities: AgentCapabilities
     hooks: list[AgentHook] = field(default_factory=list)
+    approval_handler: ApprovalHandler = field(default_factory=DenyingApprovalHandler)
 
     @classmethod
     def create(
@@ -27,6 +29,7 @@ class AgentRuntime:
         capabilities: AgentCapabilities,
         history_budget_chars: int = 120000,
         hooks: list[AgentHook] | None = None,
+        approval_handler: ApprovalHandler | None = None,
     ) -> "AgentRuntime":
         resolved_cwd = Path(cwd).resolve()
         return cls(
@@ -42,4 +45,5 @@ class AgentRuntime:
             policy=policy,
             capabilities=capabilities,
             hooks=list(hooks or []),
+            approval_handler=approval_handler or DenyingApprovalHandler(),
         )

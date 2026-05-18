@@ -3,6 +3,12 @@ from pathlib import Path
 
 import pytest
 
+from miniharness.approvals import (
+    ApprovalAction,
+    ApprovalDecision,
+    ApprovalRequest,
+    DenyingApprovalHandler,
+)
 from miniharness.capabilities import AgentCapabilities
 from miniharness.hooks import ConsoleHook
 from miniharness.policy import PermissionMode, RuntimePolicy
@@ -12,6 +18,8 @@ from miniharness.permissions import (
     check_tool_permission,
 )
 from miniharness.runtime import AgentRuntime
+from miniharness.tools.base import ToolContext
+from miniharness.session import Session
 
 
 def test_runtime_policy_defaults():
@@ -412,3 +420,79 @@ def test_agent_runtime_resolves_cwd_and_builds_session_and_tool_context(tmp_path
     assert runtime.tool_context.shell_timeout == 45
     assert runtime.tool_context.allow_outside_cwd is True
     assert len(runtime.hooks) == 1
+
+
+def test_approval_request_defaults_metadata():
+    request = ApprovalRequest(
+        tool_name="run_shell",
+        arguments={"command": "echo hello > out.txt"},
+        reason="approval_required",
+        message="tool run_shell requires user approval in the current permission mode",
+    )
+
+    assert request.metadata == {}
+
+
+def test_approval_decision_defaults_metadata():
+    decision = ApprovalDecision(
+        action=ApprovalAction.REJECT,
+        reason="approval_not_available",
+    )
+
+    assert decision.metadata == {}
+
+
+def test_denying_approval_handler_reuses_request_message():
+    handler = DenyingApprovalHandler()
+    request = ApprovalRequest(
+        tool_name="run_shell",
+        arguments={"command": "echo hello > out.txt"},
+        reason="approval_required",
+        message="tool run_shell requires user approval in the current permission mode",
+    )
+
+    decision = handler.decide(request)
+
+    assert decision == ApprovalDecision(
+        action=ApprovalAction.REJECT,
+        reason="approval_not_available",
+        message="tool run_shell requires user approval in the current permission mode",
+        metadata={"tool_name": "run_shell"},
+    )
+
+
+def test_agent_runtime_defaults_to_denying_approval_handler_when_built_directly(
+    tmp_path,
+):
+    runtime = AgentRuntime(
+        cwd=tmp_path.resolve(),
+        session=Session(cwd=tmp_path, history_budget_chars=123),
+        tool_context=ToolContext(cwd=tmp_path.resolve()),
+        policy=RuntimePolicy(),
+        capabilities=AgentCapabilities(),
+    )
+
+    assert isinstance(runtime.approval_handler, DenyingApprovalHandler)
+
+
+def test_agent_runtime_create_installs_default_approval_handler(tmp_path):
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(),
+        capabilities=AgentCapabilities(),
+    )
+
+    assert isinstance(runtime.approval_handler, DenyingApprovalHandler)
+
+
+def test_agent_runtime_create_preserves_injected_approval_handler(tmp_path):
+    handler = DenyingApprovalHandler()
+
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(),
+        capabilities=AgentCapabilities(),
+        approval_handler=handler,
+    )
+
+    assert runtime.approval_handler is handler
