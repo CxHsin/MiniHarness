@@ -7,9 +7,10 @@ from miniharness.agent import Agent
 from miniharness.capabilities import AgentCapabilities
 from miniharness.hooks import HookEvent
 from miniharness.model_client import ModelResponse, ToolCall
-from miniharness.policy import RuntimePolicy
+from miniharness.policy import PermissionMode, RuntimePolicy
 from miniharness.runtime import AgentRuntime
 from miniharness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
+from miniharness.tools.shell import RunShellTool
 
 
 class EchoTool(Tool):
@@ -302,6 +303,75 @@ def test_agent_denied_shell_does_not_fall_through_to_registry_execute(tmp_path):
     content = json.loads(model.calls[1]["messages"][-1]["content"])
     assert content["ok"] is False
     assert "disabled by runtime policy" in content["error"]
+
+
+def test_agent_routes_default_mode_ambiguous_shell_to_approval_required(tmp_path):
+    recorder = RecordingHook()
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments={"command": "echo hello > out.txt"},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.DEFAULT),
+        capabilities=AgentCapabilities(),
+        hooks=[recorder],
+    )
+    agent = Agent(model_client=model, tools=[RunShellTool()], cwd=tmp_path, runtime=runtime)
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is False
+    assert "requires user approval" in content["error"]
+    assert content["metadata"]["permission_mode"] == "default"
+    tool_completed = [event for event in recorder.events if event.type == "tool.completed"][0]
+    assert tool_completed.payload["ok"] is False
+
+
+def test_agent_executes_safe_shell_command_in_plan_mode(tmp_path):
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments={"command": "dir"},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.PLAN),
+        capabilities=AgentCapabilities(),
+    )
+    agent = Agent(model_client=model, tools=[RunShellTool()], cwd=tmp_path, runtime=runtime)
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is True
+    assert content["metadata"]["returncode"] == 0
 
 
 def test_agent_executes_all_tool_calls_despite_partial_failure(tmp_path):

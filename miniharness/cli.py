@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print structured execution trace to stderr",
     )
+    parser.add_argument(
+        "--permission-mode",
+        choices=["default", "plan", "auto"],
+        default="default",
+        help="permission behavior for run_shell: balanced default, conservative plan, or permissive auto",
+    )
     parser.add_argument("--allow-outside-cwd", action="store_true")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -92,6 +98,7 @@ def _build_agent(config) -> Agent:
         policy=RuntimePolicy(
             allow_outside_cwd=config.allow_outside_cwd,
             shell_timeout=config.shell_timeout,
+            permission_mode=config.permission_mode,
         ),
         capabilities=AgentCapabilities(),
         history_budget_chars=config.history_budget_chars,

@@ -9,7 +9,7 @@ from typing import Any
 
 from .capabilities import AgentCapabilities
 from .hooks import AgentHook, HookDispatcher, HookEvent
-from .permissions import check_tool_permission
+from .permissions import PermissionAction, check_tool_permission
 from .model_client import ModelClient, ToolCall
 from .policy import RuntimePolicy
 from .prompts import build_system_prompt
@@ -209,8 +209,10 @@ class Agent:
             tool_call.name,
             tool_call.arguments,
         )
-        if not decision.allowed:
-            return ToolResult(False, "", decision.error)
+        if decision.action is PermissionAction.DENY:
+            return ToolResult(False, "", decision.message or decision.reason, decision.metadata)
+        if decision.action is PermissionAction.ASK_USER:
+            return ToolResult(False, "", decision.message or decision.reason, decision.metadata)
         try:
             return self.tools.execute(tool_call.name, tool_call.arguments, self.context)
         except KeyboardInterrupt:

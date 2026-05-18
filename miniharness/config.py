@@ -7,6 +7,8 @@ from typing import Any
 
 from dotenv import dotenv_values
 
+from .policy import PermissionMode
+
 
 @dataclass(frozen=True)
 class Config:
@@ -22,6 +24,7 @@ class Config:
     log_level: str = "WARNING"
     allow_outside_cwd: bool = False
     trace: bool = False
+    permission_mode: PermissionMode = PermissionMode.DEFAULT
 
 
 def load_config(args: Any, env_path: str | Path | None = None) -> Config:
@@ -57,4 +60,5 @@ def load_config(args: Any, env_path: str | Path | None = None) -> Config:
         log_level=log_level,
         allow_outside_cwd=args.allow_outside_cwd,
         trace=getattr(args, "trace", False),
+        permission_mode=PermissionMode(getattr(args, "permission_mode", "default")),
     )

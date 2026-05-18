@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- Added `PermissionMode` with `default`, `plan`, and `auto`.
+- Replaced boolean shell permission checks with explicit `allow`, `deny`, and `ask_user` decisions.
+- Added deny-rule-first shell enforcement and approval-required fallback for ambiguous shell commands.
+- Added CLI and config support for `--permission-mode`.
+
 ## 0.2.2
 
 - Added `RuntimePolicy.shell_enabled` and `miniharness.permissions` for runtime permission decisions.
