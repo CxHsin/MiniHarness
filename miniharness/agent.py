@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .approvals import ApprovalAction, ApprovalRequest
 from .capabilities import AgentCapabilities
 from .hooks import AgentHook, HookDispatcher, HookEvent
 from .permissions import PermissionAction, check_tool_permission
@@ -212,7 +214,30 @@ class Agent:
         if decision.action is PermissionAction.DENY:
             return ToolResult(False, "", decision.message or decision.reason, decision.metadata)
         if decision.action is PermissionAction.ASK_USER:
-            return ToolResult(False, "", decision.message or decision.reason, decision.metadata)
+            request = ApprovalRequest(
+                tool_name=tool_call.name,
+                arguments=deepcopy(tool_call.arguments),
+                reason=decision.reason,
+                message=decision.message or decision.reason,
+                metadata=deepcopy(decision.metadata),
+            )
+            approval = self.runtime.approval_handler.decide(request)
+            if approval.action is ApprovalAction.APPROVE:
+                try:
+                    return self.tools.execute(tool_call.name, tool_call.arguments, self.context)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    return ToolResult(False, "", str(exc))
+            metadata = dict(decision.metadata)
+            if approval.metadata:
+                metadata["approval"] = approval.metadata
+            return ToolResult(
+                False,
+                "",
+                approval.message or decision.message or approval.reason,
+                metadata,
+            )
         try:
             return self.tools.execute(tool_call.name, tool_call.arguments, self.context)
         except KeyboardInterrupt:

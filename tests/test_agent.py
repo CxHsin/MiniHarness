@@ -1,13 +1,16 @@
 import json
 import pytest
 
+from miniharness.approvals import ApprovalAction, ApprovalDecision, ApprovalRequest
 from tests.conftest import FakeModelClient
 
+from miniharness import agent as agent_module
 from miniharness.agent import Agent
 from miniharness.capabilities import AgentCapabilities
 from miniharness.hooks import HookEvent
 from miniharness.model_client import ModelResponse, ToolCall
 from miniharness.policy import PermissionMode, RuntimePolicy
+from miniharness.permissions import PermissionAction, PermissionDecision
 from miniharness.runtime import AgentRuntime
 from miniharness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 from miniharness.tools.shell import RunShellTool
@@ -41,6 +44,74 @@ class RecordingHook:
 
     def handle(self, event: HookEvent) -> None:
         self.events.append(event)
+
+
+class RecordingApprovalHandler:
+    def __init__(self, decision: ApprovalDecision):
+        self.decision = decision
+        self.requests: list[ApprovalRequest] = []
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(request)
+        return self.decision
+
+
+class MutatingRejectApprovalHandler:
+    def __init__(self):
+        self.requests: list[ApprovalRequest] = []
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(request)
+        request.arguments["command"] = "echo mutated"
+        request.metadata["permission_mode"] = "mutated"
+        return ApprovalDecision(
+            action=ApprovalAction.REJECT,
+            reason="approval_not_available",
+            message="custom reject message",
+        )
+
+
+class MutatingApproveApprovalHandler:
+    def __init__(self):
+        self.requests: list[ApprovalRequest] = []
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(request)
+        request.arguments["command"] = "echo mutated"
+        request.metadata["permission_mode"] = "mutated"
+        return ApprovalDecision(
+            action=ApprovalAction.APPROVE,
+            reason="approved_for_test",
+        )
+
+
+class NestedMutatingRejectApprovalHandler:
+    def __init__(self):
+        self.requests: list[ApprovalRequest] = []
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(request)
+        request.arguments["context"]["files"].append("mutated")
+        request.metadata["risk_tags"][1]["nested"].append("mutated")
+        return ApprovalDecision(
+            action=ApprovalAction.REJECT,
+            reason="approval_not_available",
+            message="nested custom reject message",
+        )
+
+
+class NestedMutatingApproveApprovalHandler:
+    def __init__(self):
+        self.requests: list[ApprovalRequest] = []
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(request)
+        request.arguments["context"]["files"].append("mutated")
+        request.metadata["risk_tags"][1]["nested"].append("mutated")
+        return ApprovalDecision(
+            action=ApprovalAction.APPROVE,
+            reason="approved_for_test",
+        )
 
 
 class FailingExecuteRegistry(ToolRegistry):
@@ -340,6 +411,284 @@ def test_agent_routes_default_mode_ambiguous_shell_to_approval_required(tmp_path
     assert content["metadata"]["permission_mode"] == "default"
     tool_completed = [event for event in recorder.events if event.type == "tool.completed"][0]
     assert tool_completed.payload["ok"] is False
+
+
+def test_agent_routes_ask_user_through_approval_handler(tmp_path):
+    handler = RecordingApprovalHandler(
+        ApprovalDecision(
+            action=ApprovalAction.REJECT,
+            reason="approval_not_available",
+            message="tool run_shell requires user approval in the current permission mode",
+        )
+    )
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments={"command": "echo hello > out.txt"},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.DEFAULT),
+        capabilities=AgentCapabilities(),
+        approval_handler=handler,
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[RunShellTool()],
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    assert len(handler.requests) == 1
+    assert handler.requests[0] == ApprovalRequest(
+        tool_name="run_shell",
+        arguments={"command": "echo hello > out.txt"},
+        reason="approval_required",
+        message="tool run_shell requires user approval in the current permission mode",
+        metadata={
+            "tool_name": "run_shell",
+            "permission_mode": "default",
+            "risk_tags": ["shell_exec"],
+            "rule": "mode_fallback",
+        },
+    )
+
+
+def test_agent_rejected_approval_does_not_fall_through_to_registry_execute(tmp_path):
+    handler = MutatingRejectApprovalHandler()
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments={"command": "echo hello > out.txt"},
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.DEFAULT),
+        capabilities=AgentCapabilities(),
+        approval_handler=handler,
+    )
+    agent = Agent(
+        model_client=model,
+        tools=FailingExecuteRegistry([RunShellTool()]),
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is False
+    assert content["error"] == "custom reject message"
+    assert content["metadata"] == {
+        "tool_name": "run_shell",
+        "permission_mode": "default",
+        "risk_tags": ["shell_exec"],
+        "rule": "mode_fallback",
+    }
+    assert len(handler.requests) == 1
+
+
+def test_agent_executes_tool_when_approval_handler_approves(tmp_path):
+    handler = MutatingApproveApprovalHandler()
+    model = FakeModelClient(
+        [
+                ModelResponse(
+                    content=None,
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            name="run_shell",
+                            arguments={"command": "echo original"},
+                        )
+                    ],
+                ),
+                ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.DEFAULT),
+        capabilities=AgentCapabilities(),
+        approval_handler=handler,
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[RunShellTool()],
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is True
+    assert content["output"] == "original"
+    assert content["metadata"]["returncode"] == 0
+    assert len(handler.requests) == 1
+
+
+def test_agent_rejected_approval_copies_nested_arguments_and_metadata(tmp_path, monkeypatch):
+    handler = NestedMutatingRejectApprovalHandler()
+    tool_arguments = {
+        "command": "echo hello > out.txt",
+        "context": {"files": ["original"]},
+    }
+    permission_metadata = {
+        "tool_name": "run_shell",
+        "permission_mode": "default",
+        "risk_tags": ["shell_exec", {"nested": ["read_only"]}],
+        "rule": "mode_fallback",
+    }
+    monkeypatch.setattr(
+        agent_module,
+        "check_tool_permission",
+        lambda policy, tool_name, args: PermissionDecision(
+            action=PermissionAction.ASK_USER,
+            reason="approval_required",
+            source="fallback",
+            message="tool run_shell requires user approval in the current permission mode",
+            metadata=permission_metadata,
+        ),
+    )
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments=tool_arguments,
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.DEFAULT),
+        capabilities=AgentCapabilities(),
+        approval_handler=handler,
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[RunShellTool()],
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    # Replace the default decision payload with one carrying nested metadata.
+    handler.decision = ApprovalDecision(
+        action=ApprovalAction.REJECT,
+        reason="approval_not_available",
+        message="nested custom reject message",
+    )
+    # The permission layer still controls the request payload; we mutate only via the handler.
+    # Directly patching the expected permission metadata isn't possible here, so the approval
+    # request mutation proof relies on the copied request object preserving the original dicts.
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is False
+    assert content["error"] == "nested custom reject message"
+    assert tool_arguments["context"]["files"] == ["original"]
+    assert permission_metadata["risk_tags"][1]["nested"] == ["read_only"]
+    assert content["metadata"] == permission_metadata
+    assert len(handler.requests) == 1
+
+
+def test_agent_approval_handler_cannot_mutate_nested_tool_arguments_before_execution(tmp_path, monkeypatch):
+    handler = NestedMutatingApproveApprovalHandler()
+    tool_arguments = {
+        "command": "echo original",
+        "context": {"files": ["original"]},
+    }
+    permission_metadata = {
+        "tool_name": "run_shell",
+        "permission_mode": "default",
+        "risk_tags": ["shell_exec", {"nested": ["read_only"]}],
+        "rule": "mode_fallback",
+    }
+    monkeypatch.setattr(
+        agent_module,
+        "check_tool_permission",
+        lambda policy, tool_name, args: PermissionDecision(
+            action=PermissionAction.ASK_USER,
+            reason="approval_required",
+            source="fallback",
+            message="tool run_shell requires user approval in the current permission mode",
+            metadata=permission_metadata,
+        ),
+    )
+    model = FakeModelClient(
+        [
+            ModelResponse(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="run_shell",
+                        arguments=tool_arguments,
+                    )
+                ],
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime.create(
+        cwd=tmp_path,
+        policy=RuntimePolicy(permission_mode=PermissionMode.DEFAULT),
+        capabilities=AgentCapabilities(),
+        approval_handler=handler,
+    )
+    agent = Agent(
+        model_client=model,
+        tools=[RunShellTool()],
+        cwd=tmp_path,
+        runtime=runtime,
+    )
+
+    outcome = agent.run("hello")
+
+    assert outcome.exit_code == 0
+    content = json.loads(model.calls[1]["messages"][-1]["content"])
+    assert content["ok"] is True
+    assert content["output"] == "original"
+    assert tool_arguments["context"]["files"] == ["original"]
+    assert permission_metadata["risk_tags"][1]["nested"] == ["read_only"]
+    assert len(handler.requests) == 1
 
 
 def test_agent_executes_safe_shell_command_in_plan_mode(tmp_path):
