@@ -63,7 +63,7 @@ def test_main_prints_version(capsys):
         cli.main(["--version"])
 
     assert exc.value.code == 0
-    assert "mh 0.2.3" in capsys.readouterr().out
+    assert "mh 0.2.4" in capsys.readouterr().out
 
 
 def test_main_requires_api_key_for_task(monkeypatch, tmp_path, capsys):
@@ -187,6 +187,27 @@ def test_main_builds_runtime_and_passes_it_to_agent(monkeypatch, tmp_path, capsy
     assert runtime.session.history_budget_chars == 120000
     assert len(runtime.hooks) == 1
     assert "hooks" not in captured_agent_kwargs
+
+
+def test_main_builds_runtime_with_default_approval_handler(monkeypatch, tmp_path):
+    captured_agent_kwargs = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured_agent_kwargs.update(kwargs)
+
+        def run(self, task):
+            return cli.AgentOutcome(output="done", error=None, exit_code=0)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setattr(
+        cli, "OpenAIModelClient", lambda api_key, model, base_url=None: object()
+    )
+    monkeypatch.setattr(cli, "Agent", FakeAgent)
+
+    cli.main(["--cwd", str(tmp_path), "summarize"])
+
+    assert captured_agent_kwargs["runtime"].approval_handler is not None
 
 
 def test_runtime_mapping_keeps_policy_session_and_loop_fields_separate(

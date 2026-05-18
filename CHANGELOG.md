@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+- Added a CLI runtime assertion test covering default approval-handler wiring.
+- Bumped the package version to `0.2.4` for the approval runtime release.
+
 ## 0.2.3
 
 - Added `PermissionMode` with `default`, `plan`, and `auto`.
