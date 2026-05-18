@@ -62,7 +62,7 @@ This is preferable to extending `permissions.py` further because:
 - `Agent` stays the single orchestration boundary
 - future UI-specific approval implementations can be added without rewriting permission logic
 
-No package export change is required in this increment.
+No package export change is required in this increment. However, `miniharness.approvals` should be treated as a real module-level API surface for future custom approval handlers even if `miniharness/__init__.py` does not re-export those types in v0.2.4.
 
 ## Design Overview
 
@@ -120,12 +120,14 @@ class DenyingApprovalHandler:
         return ApprovalDecision(
             action=ApprovalAction.REJECT,
             reason="approval_not_available",
-            message="tool execution requires approval, but no approval handler is available",
+            message=request.message,
             metadata={"tool_name": request.tool_name},
         )
 ```
 
 This implementation is intentionally simple. Its job is not to simulate approval; its job is to prove the execution shape while keeping behavior safe by default.
+
+The default rejecting handler should preserve the original permission-layer user-facing message rather than replacing it with a new approval-specific string. This keeps current `ASK_USER`-path agent tests and user-visible error text stable while the execution shape changes underneath.
 
 ### AgentRuntime Composition
 
@@ -140,12 +142,14 @@ class AgentRuntime:
     policy: RuntimePolicy
     capabilities: AgentCapabilities
     hooks: list[AgentHook]
-    approval_handler: ApprovalHandler
+    approval_handler: ApprovalHandler = field(default_factory=DenyingApprovalHandler)
 ```
 
 `AgentRuntime.create(...)` should construct a default `DenyingApprovalHandler()` when one is not provided.
 
 This keeps runtime as the composition layer, consistent with how hooks, policy, and capabilities were introduced in v0.2.1.
+
+This default is important for direct `AgentRuntime(...)` construction as well as `AgentRuntime.create(...)`. v0.2.4 should not allow `approval_handler` to be absent, because an absent handler would turn `ASK_USER` into an execution-time crash rather than a conservative rejection.
 
 ### Execution Flow
 
@@ -228,6 +232,8 @@ Existing behavior should remain:
 
 This increment should not add approval-specific console rendering yet.
 
+This does preserve a temporary semantic mismatch: a tool can emit `tool.started` and later `tool.completed(ok=False)` even when the underlying tool implementation never actually ran because approval was rejected. That mismatch already exists in the current permission-denial path and is acceptable in v0.2.4. A future increment may add `approval.requested` / `approval.resolved` events to make the sequence more precise.
+
 ## CLI Integration
 
 No new CLI flag is needed in v0.2.4.
@@ -271,16 +277,20 @@ Add tests for:
 - rejected approval requests do not execute the tool
 - approval rejection message is surfaced through the final `ToolResult`
 - a custom approving handler allows the tool to execute
+- existing `ASK_USER`-path tests should continue to match the permission-layer user-facing message, such as `"requires user approval"`, rather than needing a new approval-specific default rejection string
 
 One important integration assertion is:
 
 - `ToolRegistry.execute()` must not run when approval is rejected
+
+The existing `FailingExecuteRegistry` pattern in `tests/test_agent.py` is the right mechanism to prove that rejected approval requests do not fall through to registry execution.
 
 ### Runtime And CLI Tests
 
 Add tests for:
 
 - `AgentRuntime.create()` installing a default approval handler
+- direct `AgentRuntime(...)` construction receiving a conservative default handler through the dataclass field default
 - explicitly injected approval handlers being preserved
 - CLI-built runtimes receiving the default approval handler through composition
 
