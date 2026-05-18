@@ -101,7 +101,14 @@ Field intent:
 - `ApprovalAction`: whether the request is approved or rejected
 - `ApprovalDecision`: the approval subsystem's result
 
+Within `ApprovalRequest`:
+
+- `reason` should carry the stable machine-readable explanation key from permission evaluation, such as `approval_required`
+- `message` should carry the user-facing text, such as `tool run_shell requires user approval in the current permission mode`
+
 The request should carry the tool name, raw arguments, and permission-derived metadata forward intact so later approval UIs do not need to reconstruct missing context.
+
+`ApprovalRequest.arguments` should contain the original parsed tool-call arguments from the model response. By the time approval handling runs, JSON parsing has already succeeded, but tool-schema validation has not necessarily happened yet. Approval handlers should treat these arguments as parsed-but-not-yet-validated input.
 
 ### Approval Handler Interface
 
@@ -187,7 +194,8 @@ if decision.action is PermissionAction.ASK_USER:
     approval = self.runtime.approval_handler.decide(request)
     if approval.action is ApprovalAction.REJECT:
         metadata = dict(decision.metadata)
-        metadata["approval"] = approval.metadata
+        if approval.metadata:
+            metadata["approval"] = approval.metadata
         return ToolResult(False, "", approval.message or approval.reason, metadata)
 ```
 
@@ -278,6 +286,7 @@ Add tests for:
 - approval rejection message is surfaced through the final `ToolResult`
 - a custom approving handler allows the tool to execute
 - existing `ASK_USER`-path tests should continue to match the permission-layer user-facing message, such as `"requires user approval"`, rather than needing a new approval-specific default rejection string
+- rejected approval results should not add a noisy empty `approval` metadata object when the approval decision contributes no extra metadata
 
 One important integration assertion is:
 
