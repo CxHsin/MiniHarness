@@ -6,14 +6,14 @@ MiniHarness 是一个小型、本地运行的 CLI Agent。它使用 OpenAI-compa
 
 ## 最新状态
 
-- 当前版本：`0.2.1`
+- 当前版本：`0.2.4`
 - 当前入口：`mh`
 - 当前运行模式：一次性任务模式和交互式 REPL
 - 当前模型接口：OpenAI-compatible Chat Completions API
 - 当前工具：`list_dir`、`read_file`、`write_file`、`search_text`、`run_shell`、`todo`
 - 当前可观测性：支持 `--trace`，可在 stderr 输出结构化执行轨迹
-- 当前系统骨架：已引入 `RuntimePolicy`、`AgentCapabilities`、`AgentRuntime`
-- 当前测试覆盖：agent loop、tools、config、CLI、model client、hooks / trace、runtime scaffold
+- 当前系统骨架：已引入 `RuntimePolicy`、`AgentCapabilities`、`AgentRuntime`、approval runtime
+- 当前测试覆盖：agent loop、tools、config、CLI、model client、hooks / trace、runtime scaffold、approval runtime
 
 ## 快速开始
 
@@ -241,13 +241,16 @@ mh --trace --cwd . "总结这个项目"
 
 ### Runtime Scaffold
 
-MiniHarness v0.2.1 引入了最小系统骨架，用于给未来 memory、权限系统和 skills 留清晰挂点。
+MiniHarness 从 v0.2.1 到 v0.2.4 逐步引入了最小系统骨架，用于给未来 memory、权限系统、approval 和 skills 留清晰挂点。
 
-- `RuntimePolicy`：表达运行期策略，如 `shell_timeout` 和 `allow_outside_cwd`
+- `RuntimePolicy`：表达运行期策略，如 `shell_timeout`、`allow_outside_cwd`、`shell_enabled` 和 `permission_mode`
 - `AgentCapabilities`：表达当前 agent 具备哪些系统能力
-- `AgentRuntime`：组合 `cwd`、`session`、`tool_context`、`policy`、`capabilities` 和 `hooks`
+- `AgentRuntime`：组合 `cwd`、`session`、`tool_context`、`policy`、`capabilities`、`hooks` 和 `approval_handler`
+- `miniharness.approvals`：提供 `ApprovalRequest`、`ApprovalDecision`、`ApprovalAction` 和默认的保守 approval handler
 
-这次增量是结构性改进，不改变现有命令使用方式，也不提前实现长期 memory、动态 skills 或审批流。
+当前状态下，permission 系统已经支持 `allow`、`deny` 和 `ask_user` 三种结果；其中 `ask_user` 不再只是普通失败标签，而是会进入真实的 approval runtime 分支。
+
+这几次增量仍然是结构性改进：它们不引入长期 memory，不引入动态 skills，也还没有交互式 approval dialog。
 
 ### Session / Context
 
@@ -266,6 +269,8 @@ MiniHarness v0.2.1 引入了最小系统骨架，用于给未来 memory、权限
 - 访问当前进程可见的凭据
 - 访问网络
 - 执行破坏性命令
+
+从 v0.2.3 开始，`run_shell` 已接入 mode-aware permission pipeline；从 v0.2.4 开始，`ASK_USER` 会进入 approval runtime。当前默认 approval handler 仍然是保守拒绝，因此系统已经具备审批执行骨架，但还没有真正的 CLI 交互审批提示。
 
 MiniHarness 会拒绝部分明显需要交互输入的项目生成命令，例如 `npm create`、`create-next-app`、`create vite`，避免命令挂起等待输入。但它不能替代 Docker、虚拟机或真正的权限沙箱。
 
@@ -295,7 +300,8 @@ mh --shell-timeout 120 "运行测试并总结失败原因"
 - 不做长期记忆、上下文压缩、插件系统、subagent 或 MCP
 - hooks 当前只用于可观测性，不支持拦截、取消、重试或修改执行流程
 - 不支持从配置或文件系统动态加载用户自定义 hook
-- runtime scaffold 当前只提供系统层挂点，不提供真实 memory、权限审批或 skills 执行能力
+- runtime scaffold 已提供 permission 和 approval 的运行时骨架，但仍不提供真实 memory、持久化审批记录或 skills 执行能力
+- approval runtime 当前只有默认保守 handler，还没有交互式 approval dialog 或 `--approval-policy`
 - shell 权限模型较宽，适合本地可信开发环境，不适合直接处理不可信任务
 - 不同 OpenAI-compatible provider 的 tool calling 兼容性差异较大，需要按服务商实际行为调试
 
@@ -378,7 +384,7 @@ py -3.12 -m pytest -v
 当前测试覆盖：
 
 - agent loop 终止、工具调用、错误处理和截断行为
-- runtime scaffold 默认值、注入路径和 cwd 一致性
+- runtime scaffold 默认值、注入路径、approval handler 组装和 cwd 一致性
 - 文件、搜索、shell、todo 工具
 - `.env`、环境变量和 CLI 参数合并
 - OpenAI-compatible 响应解析和错误分类
